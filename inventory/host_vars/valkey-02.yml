@@ -1,0 +1,3 @@
+---
+valkey_mode: replica
+valkey_maxmemory: 192mb

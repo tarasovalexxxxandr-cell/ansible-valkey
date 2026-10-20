@@ -1,0 +1,60 @@
+---
+driver:
+  name: default
+dependency:
+  name: galaxy
+  enabled: false
+platforms:
+  - name: primary
+    groups: [valkey_nodes, valkey_primary]
+  - name: replica
+    groups: [valkey_nodes, valkey_replicas]
+provisioner:
+  name: ansible
+  env:
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/..:${HOME}/.ansible/roles"
+  inventory:
+    group_vars:
+      all:
+        ansible_connection: community.docker.docker
+        ansible_user: root
+        ansible_python_interpreter: /usr/bin/python3
+      valkey_nodes:
+        ansible_host: "valkey-{{ lookup('ansible.builtin.file', molecule_ephemeral_directory + '/run-id') }}-{{ inventory_hostname }}"
+        valkey_port: 6379
+        valkey_bind_address: "{{ ansible_facts['default_ipv4']['address'] }}"
+        valkey_bind: [127.0.0.1, "{{ valkey_bind_address }}"]
+        valkey_primary_address: "{{ hostvars[groups['valkey_primary'][0]].valkey_bind_address }}"
+        valkey_primary_port: "{{ hostvars[groups['valkey_primary'][0]].valkey_port }}"
+        valkey_allowed_networks:
+          - "{{ hostvars[groups['valkey_primary'][0]].valkey_bind_address }}/32"
+          - "{{ hostvars[groups['valkey_replicas'][0]].valkey_bind_address }}/32"
+        firewall_management_networks: "{{ valkey_allowed_networks }}"
+        firewall_rollback_timeout: 30
+        valkey_test_ssh_port: "{{ lookup('ansible.builtin.env', 'VALKEY_TEST_SSH_PORT') | default('2222', true) | int }}"
+        valkey_maxmemory_policy: allkeys-lru
+        valkey_password: "{{ lookup('ansible.builtin.file', molecule_ephemeral_directory + '/valkey-password') }}"
+    host_vars:
+      primary:
+        valkey_mode: primary
+        valkey_maxmemory: 64mb
+      replica:
+        valkey_mode: replica
+        valkey_maxmemory: 48mb
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - check
+    - idempotence
+    - verify
+    - side_effect
+    - converge
+    - idempotence
+    - verify
+    - destroy

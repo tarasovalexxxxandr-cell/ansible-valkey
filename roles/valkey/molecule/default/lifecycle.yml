@@ -1,0 +1,178 @@
+---
+- name: Keep an authenticated SSH session open during firewall changes
+  hosts: valkey_primary
+  gather_facts: false
+  tasks:
+    - name: Start a long-lived SSH session to the replica
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -i
+          - /root/.ssh/valkey-test
+          - -p
+          - "{{ valkey_test_ssh_port | string }}"
+          - -o
+          - BatchMode=yes
+          - -o
+          - StrictHostKeyChecking=yes
+          - "root@{{ hostvars[groups['valkey_replicas'][0]].valkey_bind_address }}"
+          - sleep 30
+      async: 75
+      poll: 0
+      register: valkey_test_open_session
+      changed_when: false
+
+    - name: Wait until the SSH TCP session is established
+      ansible.builtin.command:
+        argv: [ss, -H, -tn, state, established, dport, '=', ":{{ valkey_test_ssh_port }}"]
+      register: valkey_test_established
+      changed_when: false
+      until: valkey_test_established.stdout | length > 0
+      retries: 10
+      delay: 1
+
+- name: Exercise both firewall service lifecycles
+  hosts: valkey_nodes
+  gather_facts: false
+  tasks:
+    - name: Restart the isolated firewall service
+      ansible.builtin.systemd_service:
+        name: valkey-firewall
+        state: restarted
+
+    - name: Reload the existing global nftables service
+      ansible.builtin.systemd_service:
+        name: nftables
+        state: reloaded
+
+- name: Verify restoration after a global reload
+  ansible.builtin.import_playbook: environment.yml
+
+- name: Exercise a global firewall restart
+  hosts: valkey_nodes
+  gather_facts: false
+  tasks:
+    - name: Restart the existing global nftables service
+      ansible.builtin.systemd_service:
+        name: nftables
+        state: restarted
+
+- name: Verify survival of the existing SSH session
+  hosts: valkey_primary
+  gather_facts: false
+  tasks:
+    - name: Wait for the original SSH session to finish successfully
+      ansible.builtin.async_status:
+        jid: "{{ valkey_test_open_session.ansible_job_id }}"
+      register: valkey_test_session_result
+      until: valkey_test_session_result.finished
+      retries: 30
+      delay: 1
+      failed_when: valkey_test_session_result.finished and valkey_test_session_result.rc != 0
+
+- name: Verify both tables and SSH after firewall restarts
+  ansible.builtin.import_playbook: environment.yml
+
+- name: Schedule rollback and deliberately block new SSH connections
+  hosts: valkey_nodes
+  gather_facts: false
+  tasks:
+    - name: Save the known-good project configuration
+      ansible.builtin.copy:
+        src: /etc/nftables.d/valkey.nft
+        dest: /run/valkey-firewall.rollback.nft
+        remote_src: true
+        mode: '0600'
+
+    - name: Schedule the same independent rollback mechanism
+      ansible.builtin.command:
+        argv:
+          - systemd-run
+          - --collect
+          - --unit=valkey-test-rollback
+          - --on-active=15s
+          - --timer-property=AccuracySec=1s
+          - --property=ExecStartPost=/bin/cp /run/valkey-firewall.rollback.nft /etc/nftables.d/valkey.nft
+          - /usr/sbin/nft
+          - --file
+          - /run/valkey-firewall.rollback.nft
+      changed_when: true
+
+    - name: Persist the deliberately incorrect rule for the rollback test
+      ansible.builtin.lineinfile:
+        path: /etc/nftables.d/valkey.nft
+        insertafter: 'type filter hook'
+        line: "        tcp dport {{ valkey_test_ssh_port }} drop"
+
+    - name: Insert an intentionally incorrect SSH drop rule
+      ansible.builtin.command:
+        argv: [/usr/sbin/nft, insert, rule, inet, valkey, input, tcp, dport, "{{ valkey_test_ssh_port | string }}", drop]
+      changed_when: true
+
+- name: Verify rejection and automatic recovery of SSH
+  hosts: valkey_primary
+  gather_facts: false
+  tasks:
+    - name: Confirm that the incorrect rule blocks a fresh SSH connection
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -i
+          - /root/.ssh/valkey-test
+          - -p
+          - "{{ valkey_test_ssh_port | string }}"
+          - -o
+          - BatchMode=yes
+          - -o
+          - StrictHostKeyChecking=yes
+          - -o
+          - ConnectTimeout=2
+          - "root@{{ hostvars[groups['valkey_replicas'][0]].valkey_bind_address }}"
+          - printf ssh-ok
+      register: valkey_test_blocked_ssh
+      changed_when: false
+      failed_when: valkey_test_blocked_ssh.rc == 0
+
+    - name: Wait for the independent timer to restore the SSH listener
+      ansible.builtin.wait_for:
+        host: "{{ hostvars[groups['valkey_replicas'][0]].valkey_bind_address }}"
+        port: "{{ valkey_test_ssh_port }}"
+        timeout: 45
+
+- name: Verify authenticated SSH after automatic rollback
+  ansible.builtin.import_playbook: environment.yml
+
+- name: Reboot the disposable test nodes
+  hosts: valkey_nodes
+  gather_facts: false
+  tasks:
+    - name: Compare the restored persistent configuration with its snapshot
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: [/etc/nftables.d/valkey.nft, /run/valkey-firewall.rollback.nft]
+      register: valkey_test_rollback_files
+
+    - name: Verify that the rollback restored the file as well as the kernel rules
+      ansible.builtin.assert:
+        that: valkey_test_rollback_files.results[0].stat.checksum == valkey_test_rollback_files.results[1].stat.checksum
+
+    - name: Restart the container through its init lifecycle
+      community.docker.docker_container:
+        name: "{{ hostvars[inventory_hostname].ansible_host }}"
+        state: started
+        restart: true
+      delegate_to: localhost
+      become: false
+
+    - name: Wait for the restarted test node
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+    - name: Wait for Valkey to return after boot
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ valkey_port }}"
+        timeout: 30
+
+- name: Verify boot persistence and a fresh SSH connection
+  ansible.builtin.import_playbook: environment.yml

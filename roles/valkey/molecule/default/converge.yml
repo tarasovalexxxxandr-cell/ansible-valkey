@@ -1,0 +1,11 @@
+---
+- name: Load exporter settings from the project
+  hosts: valkey_nodes
+  gather_facts: false
+  tasks:
+    - name: Load variables
+      ansible.builtin.include_vars:
+        file: ../../../../inventory/group_vars/valkey_nodes/exporters.yml
+
+- name: Apply the main playbook
+  ansible.builtin.import_playbook: ../../../../playbooks/site.yml

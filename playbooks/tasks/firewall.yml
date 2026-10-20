@@ -1,0 +1,110 @@
+---
+- name: Read the SSH connection environment before privilege escalation
+  ansible.builtin.setup:
+    gather_subset:
+      - '!all'
+      - env
+  become: false
+
+- name: Read effective sshd configuration
+  ansible.builtin.command:
+    argv: [/usr/sbin/sshd, -T]
+  register: firewall_sshd
+  changed_when: false
+  check_mode: false
+
+- name: Determine management networks and actual SSH ports
+  ansible.builtin.set_fact:
+    firewall_connection: "{{ ansible_facts['env'].SSH_CONNECTION | default('') | split }}"
+    firewall_configured_ssh_ports: >-
+      {{ firewall_sshd.stdout_lines | select('match', '^port ') | map('split') | map('last') | map('int') | list }}
+
+- name: Preserve the current SSH source and destination port
+  ansible.builtin.set_fact:
+    firewall_effective_management_networks: >-
+      {{ (firewall_management_networks | default([]) +
+          ([firewall_connection[0] + ('/128' if ':' in firewall_connection[0] else '/32')]
+           if firewall_connection | length == 4 else [])) | unique | list }}
+    firewall_effective_ssh_ports: >-
+      {{ (firewall_configured_ssh_ports + firewall_ssh_ports | default([]) +
+          ([firewall_connection[3] | int] if firewall_connection | length == 4 else [])) | unique | list }}
+
+- name: Validate firewall prerequisites
+  ansible.builtin.assert:
+    that:
+      - firewall_effective_management_networks | length > 0
+      - firewall_effective_ssh_ports | length > 0
+      - valkey_allowed_networks | length > 0
+      - firewall_rollback_timeout | default(90) | int >= 15
+    fail_msg: "Нужны SSH_CONNECTION или firewall_management_networks, sshd и разрешённые сети Valkey."
+
+- name: Install nftables without starting its global service
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    policy_rc_d: 101
+
+- name: Read the previous project table for rollback
+  ansible.builtin.command:
+    argv: [/usr/sbin/nft, list, table, inet, valkey]
+  register: firewall_previous
+  changed_when: false
+  failed_when: firewall_previous.rc not in [0, 1]
+  check_mode: false
+
+- name: Create project firewall directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /etc/nftables.d
+    - /etc/systemd/system/valkey-server.service.d
+
+- name: Validate and render the project firewall table
+  ansible.builtin.template:
+    src: nftables.conf.j2
+    dest: /etc/nftables.d/valkey.nft
+    owner: root
+    group: root
+    mode: "0600"
+    validate: /usr/sbin/nft --check --file %s
+  register: firewall_config
+
+- name: Install the isolated firewall service
+  ansible.builtin.template:
+    src: valkey-firewall.service.j2
+    dest: /etc/systemd/system/valkey-firewall.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: firewall_unit
+
+- name: Require the firewall before starting Valkey
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/valkey-server.service.d/firewall.conf
+    content: |
+      [Unit]
+      Requires=valkey-firewall.service
+      After=valkey-firewall.service
+      PartOf=valkey-firewall.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: firewall_dependency
+
+- name: Apply changed rules with automatic rollback
+  ansible.builtin.include_tasks: apply_firewall.yml
+  when:
+    - not ansible_check_mode
+    - firewall_config.changed or firewall_unit.changed or firewall_dependency.changed or firewall_previous.rc != 0
+
+- name: Enable the isolated firewall service
+  ansible.builtin.systemd_service:
+    name: valkey-firewall
+    state: started
+    enabled: true

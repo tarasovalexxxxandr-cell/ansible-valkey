@@ -1,0 +1,75 @@
+---
+- name: Prepare systemd and SSH test prerequisites
+  hosts: valkey_nodes
+  gather_facts: true
+  tasks:
+    - name: Verify that the test environment runs systemd
+      ansible.builtin.assert:
+        that: ansible_facts['service_mgr'] == 'systemd'
+
+    - name: Create SSH runtime and authentication directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        mode: "{{ item.mode }}"
+      loop:
+        - {path: /run/sshd, mode: '0755'}
+        - {path: /root/.ssh, mode: '0700'}
+
+    - name: Start the test SSH service
+      ansible.builtin.systemd_service:
+        name: ssh
+        state: started
+        enabled: true
+
+    - name: Generate an SSH test identity on the primary
+      ansible.builtin.user:
+        name: root
+        generate_ssh_key: true
+        ssh_key_type: ed25519
+        ssh_key_file: /root/.ssh/valkey-test
+      register: valkey_test_ssh_key
+      when: inventory_hostname in groups['valkey_primary']
+
+    - name: Authorize the disposable test identity
+      ansible.builtin.copy:
+        content: "{{ hostvars[groups['valkey_primary'][0]].valkey_test_ssh_key.ssh_public_key }}\n"
+        dest: /root/.ssh/authorized_keys
+        mode: '0600'
+
+    - name: Read the SSH host public key
+      ansible.builtin.slurp:
+        src: /etc/ssh/ssh_host_ed25519_key.pub
+      register: valkey_test_ssh_host_key
+
+    - name: Trust test host keys on the primary
+      ansible.builtin.known_hosts:
+        path: /root/.ssh/known_hosts
+        name: "[{{ hostvars[item].ansible_facts.default_ipv4.address }}]:{{ valkey_test_ssh_port }}"
+        key: >-
+          [{{ hostvars[item].ansible_facts.default_ipv4.address }}]:{{ valkey_test_ssh_port }}
+          {{ hostvars[item].valkey_test_ssh_host_key.content | b64decode | trim }}
+      loop: "{{ groups['valkey_nodes'] }}"
+      when: inventory_hostname in groups['valkey_primary']
+
+    - name: Configure an independent application's persistent nftables table
+      ansible.builtin.copy:
+        dest: /etc/nftables.conf
+        mode: '0600'
+        content: |
+          table inet molecule_other
+          delete table inet molecule_other
+          table inet molecule_other {
+              chain keep {
+              }
+          }
+          table inet valkey
+          delete table inet valkey
+          table inet valkey {
+          }
+
+    - name: Start the existing global nftables service
+      ansible.builtin.systemd_service:
+        name: nftables
+        state: started
+        enabled: true

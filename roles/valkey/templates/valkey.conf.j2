@@ -1,0 +1,24 @@
+bind {{ valkey_bind | join(' ') }}
+protected-mode yes
+port {{ valkey_port }}
+daemonize no
+supervised systemd
+pidfile /run/valkey/valkey-server.pid
+loglevel {{ valkey_loglevel }}
+logfile {{ valkey_logfile }}
+dir /var/lib/valkey
+dbfilename dump.rdb
+save 900 1
+save 300 10
+save 60 10000
+appendonly yes
+appendfsync everysec
+maxmemory {{ valkey_maxmemory }}
+maxmemory-policy {{ valkey_maxmemory_policy }}
+requirepass "{{ valkey_password }}"
+{% if valkey_mode == 'replica' %}
+replicaof {{ valkey_primary_address }} {{ valkey_primary_port }}
+masterauth "{{ valkey_password }}"
+replica-read-only yes
+replica-serve-stale-data no
+{% endif %}

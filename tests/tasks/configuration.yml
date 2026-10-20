@@ -1,0 +1,16 @@
+---
+- name: Read the Valkey configuration
+  ansible.builtin.slurp:
+    src: /etc/valkey/valkey.conf
+  register: valkey_test_config
+  no_log: true
+
+- name: Verify primary and replica configuration
+  ansible.builtin.assert:
+    that:
+      - "'maxmemory ' + valkey_maxmemory in valkey_test_config.content | b64decode"
+      - "'requirepass ' in valkey_test_config.content | b64decode"
+      - >-
+        ('replicaof ' in valkey_test_config.content | b64decode) ==
+        (valkey_mode == 'replica')
+  no_log: true

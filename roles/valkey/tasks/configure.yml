@@ -1,0 +1,40 @@
+---
+- name: Create directories with appropriate permissions
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: valkey
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: /etc/valkey, owner: root, mode: "0750"}
+    - {path: /var/lib/valkey, owner: valkey, mode: "0750"}
+    - {path: /var/log/valkey, owner: valkey, mode: "0750"}
+
+- name: Generate the Valkey configuration without exposing secrets
+  ansible.builtin.template:
+    src: valkey.conf.j2
+    dest: /etc/valkey/valkey.conf
+    owner: root
+    group: valkey
+    mode: "0640"
+    backup: false
+  no_log: true
+  diff: false
+  notify: Valkey restart
+
+- name: Apply Valkey configuration handlers
+  ansible.builtin.meta: flush_handlers
+
+- name: Start and enable Valkey
+  ansible.builtin.systemd_service:
+    name: valkey-server
+    state: started
+    enabled: true
+
+- name: Wait for the configured Valkey listener
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ valkey_port }}"
+    timeout: 15
+  when: not ansible_check_mode

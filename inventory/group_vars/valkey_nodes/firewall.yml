@@ -1,0 +1,7 @@
+---
+firewall_management_networks:
+  - 0.0.0.0/0
+  - ::/0
+firewall_ssh_ports: []
+firewall_allowed_tcp_ports: []
+firewall_rollback_timeout: 90

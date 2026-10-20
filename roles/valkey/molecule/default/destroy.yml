@@ -1,0 +1,59 @@
+---
+- name: Remove only resources owned by this test run
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Check whether a resource namespace exists
+      ansible.builtin.stat:
+        path: "{{ molecule_ephemeral_directory }}/run-id"
+      register: valkey_test_state
+
+    - name: Clean up the recorded resource namespace
+      when: valkey_test_state.stat.exists
+      block:
+        - name: Read the resource namespace
+          ansible.builtin.set_fact:
+            valkey_run_id: "{{ lookup('ansible.builtin.file', molecule_ephemeral_directory + '/run-id') }}"
+
+        - name: Validate the resource namespace before deletion
+          ansible.builtin.assert:
+            that: valkey_run_id is match('^[a-f0-9]{12}$')
+
+        - name: Inspect test instances
+          community.docker.docker_container_info:
+            name: "valkey-{{ valkey_run_id }}-{{ item.name }}"
+          loop: "{{ molecule_yml.platforms }}"
+          register: valkey_test_containers
+
+        - name: Verify ownership of existing containers
+          ansible.builtin.assert:
+            that: item.container.Config.Labels.valkey_masterclass_run == valkey_run_id
+          loop: "{{ valkey_test_containers.results }}"
+          when: item.exists
+          loop_control:
+            label: "{{ item.item.name }}"
+
+        - name: Remove test instances
+          community.docker.docker_container:
+            name: "valkey-{{ valkey_run_id }}-{{ item.name }}"
+            state: absent
+            force_kill: true
+          loop: "{{ molecule_yml.platforms }}"
+
+        - name: Remove the test network
+          community.docker.docker_network:
+            name: "valkey-{{ valkey_run_id }}-network"
+            state: absent
+
+        - name: Remove the test image
+          community.docker.docker_image:
+            name: "valkey-{{ valkey_run_id }}-systemd:test"
+            state: absent
+
+        - name: Remove temporary credentials and state
+          ansible.builtin.file:
+            path: "{{ molecule_ephemeral_directory }}/{{ item }}"
+            state: absent
+          loop: [valkey-password, run-id]

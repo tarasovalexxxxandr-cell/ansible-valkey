@@ -1,0 +1,21 @@
+table inet valkey
+delete table inet valkey
+table inet valkey {
+    chain input {
+        type filter hook input priority filter; policy drop;
+        iifname "lo" accept
+        ct state established,related accept
+        ct state invalid drop
+        meta l4proto { icmp, ipv6-icmp } accept
+        udp sport 67 udp dport 68 accept
+{% for network in firewall_effective_management_networks %}
+        tcp dport { {{ firewall_effective_ssh_ports | join(', ') }} } {{ 'ip6' if ':' in network else 'ip' }} saddr {{ network }} accept
+{% endfor %}
+{% if firewall_allowed_tcp_ports | default([]) | length > 0 %}
+        tcp dport { {{ firewall_allowed_tcp_ports | join(', ') }} } accept
+{% endif %}
+{% for network in valkey_allowed_networks %}
+        tcp dport {{ valkey_port }} {{ 'ip6' if ':' in network else 'ip' }} saddr {{ network }} accept
+{% endfor %}
+    }
+}

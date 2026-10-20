@@ -1,0 +1,15 @@
+[Unit]
+Description=Valkey firewall table
+After=network-pre.target nftables.service
+Before=valkey-server.service
+PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft --file /etc/nftables.d/valkey.nft
+ExecReload=/usr/sbin/nft --file /etc/nftables.d/valkey.nft
+
+[Install]
+WantedBy=multi-user.target

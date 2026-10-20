@@ -1,0 +1,20 @@
+---
+- name: Load the same exporter settings as converge
+  hosts: valkey_nodes
+  gather_facts: false
+  tasks:
+    - name: Load exporter settings from the project
+      ansible.builtin.include_vars:
+        file: ../../../../inventory/group_vars/valkey_nodes/exporters.yml
+
+- name: Exercise changes and drift using shared tests
+  ansible.builtin.import_playbook: ../../../../tests/change.yml
+
+- name: Exercise firewall restart, rollback and reboot
+  ansible.builtin.import_playbook: lifecycle.yml
+
+- name: Verify the changed configuration after boot
+  ansible.builtin.import_playbook: ../../../../tests/verify.yml
+
+- name: Exercise detection of configuration drift
+  ansible.builtin.import_playbook: ../../../../tests/drift.yml

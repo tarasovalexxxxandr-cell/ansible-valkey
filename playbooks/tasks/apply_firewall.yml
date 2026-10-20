@@ -1,0 +1,98 @@
+---
+- name: Save only the project table for automatic rollback
+  ansible.builtin.copy:
+    dest: /run/valkey-firewall.rollback.nft
+    content: |
+      table inet valkey
+      delete table inet valkey
+      {{ firewall_previous.stdout if firewall_previous.rc == 0 else '' }}
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Reload systemd unit definitions
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Apply rules and verify a new management connection
+  block:
+    - name: Schedule rollback independently of the Ansible connection
+      ansible.builtin.command:
+        argv:
+          - systemd-run
+          - --collect
+          - "--unit=valkey-firewall-rollback-{{ ansible_facts['date_time']['epoch'] }}"
+          - "--on-active={{ firewall_rollback_timeout | default(90) }}s"
+          - --timer-property=AccuracySec=1s
+          - --property=Type=oneshot
+          - --property=ExecStartPost=/bin/cp /run/valkey-firewall.rollback.nft /etc/nftables.d/valkey.nft
+          - /usr/sbin/nft
+          - --file
+          - /run/valkey-firewall.rollback.nft
+      register: firewall_rollback
+      changed_when: true
+
+    - name: Apply the project table atomically
+      ansible.builtin.systemd_service:
+        name: valkey-firewall
+        state: reloaded
+        enabled: true
+
+    - name: Close the previous management connection
+      ansible.builtin.meta: reset_connection
+
+    - name: Wait for a fresh management connection
+      ansible.builtin.wait_for_connection:
+        timeout: "{{ firewall_rollback_timeout | default(90) | int + 30 }}"
+        connect_timeout: 5
+
+    - name: Check that rollback did not replace the candidate
+      ansible.builtin.stat:
+        path: /etc/nftables.d/valkey.nft
+      register: firewall_applied
+
+    - name: Confirm that the candidate configuration is still applied
+      ansible.builtin.assert:
+        that: firewall_applied.stat.checksum == firewall_config.checksum
+        fail_msg: "Автоматический откат восстановил старые правила: новая конфигурация не принята."
+  rescue:
+    - name: Wait for the timed rollback to restore management access
+      ansible.builtin.wait_for_connection:
+        timeout: "{{ firewall_rollback_timeout | default(90) | int + 30 }}"
+        connect_timeout: 5
+
+    - name: Restore the previous project table
+      ansible.builtin.command:
+        argv: [/usr/sbin/nft, --file, /run/valkey-firewall.rollback.nft]
+      changed_when: true
+
+    - name: Restore the persistent rollback configuration
+      ansible.builtin.copy:
+        src: /run/valkey-firewall.rollback.nft
+        dest: /etc/nftables.d/valkey.nft
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Report the failed firewall change
+      ansible.builtin.fail:
+        msg: "Изменение firewall отменено; предыдущие правила и SSH-доступ восстановлены."
+  always:
+    - name: Check whether the transient rollback timer is still loaded
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - "valkey-firewall-rollback-{{ ansible_facts['date_time']['epoch'] }}.timer"
+          - --property=LoadState
+          - --value
+      register: firewall_timer_state
+      changed_when: false
+      failed_when: firewall_timer_state.rc != 0 and firewall_timer_state.stdout | trim != 'not-found'
+
+    - name: Cancel the independent rollback timer
+      ansible.builtin.systemd_service:
+        name: "valkey-firewall-rollback-{{ ansible_facts['date_time']['epoch'] }}.timer"
+        state: stopped
+      when: firewall_timer_state.stdout | trim != 'not-found'

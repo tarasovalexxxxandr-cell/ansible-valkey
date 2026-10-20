@@ -1,0 +1,6 @@
+---
+- name: Run environment-independent functional checks
+  ansible.builtin.import_playbook: ../../../../tests/verify.yml
+
+- name: Check the Docker test environment
+  ansible.builtin.import_playbook: environment.yml

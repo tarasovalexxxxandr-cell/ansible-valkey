@@ -1,0 +1,25 @@
+---
+- name: Simulate configuration drift
+  hosts: valkey_nodes
+  gather_facts: false
+  tasks:
+    - name: Modify the memory limit on disk
+      ansible.builtin.lineinfile:
+        path: /etc/valkey/valkey.conf
+        regexp: "^maxmemory "
+        line: "maxmemory {{ '16mb' if valkey_maxmemory == '32mb' else '32mb' }}"
+      diff: false
+      no_log: true
+
+    - name: Confirm that shared checks detect configuration drift
+      block:
+        - name: Run the same configuration checks used by verify
+          ansible.builtin.include_tasks: tasks/configuration.yml
+
+        - name: Fail if configuration drift was not detected
+          ansible.builtin.fail:
+            msg: "Проверка ошибочно приняла изменённую конфигурацию."
+      rescue:
+        - name: Verify that a configuration assertion detected the drift
+          ansible.builtin.assert:
+            that: ansible_failed_task.action == 'ansible.builtin.assert'

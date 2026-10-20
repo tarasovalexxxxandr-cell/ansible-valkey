@@ -1,0 +1,19 @@
+---
+valkey_port: 6379
+valkey_bind_address: "{{ ansible_facts['default_ipv4']['address'] }}"
+valkey_bind:
+  - 127.0.0.1
+  - "{{ valkey_bind_address }}"
+valkey_allowed_networks:
+  - >-
+    {{ hostvars[groups['valkey_primary'][0]].valkey_bind_address +
+       ('/128' if ':' in hostvars[groups['valkey_primary'][0]].valkey_bind_address else '/32') }}
+  - >-
+    {{ hostvars[groups['valkey_replicas'][0]].valkey_bind_address +
+       ('/128' if ':' in hostvars[groups['valkey_replicas'][0]].valkey_bind_address else '/32') }}
+valkey_primary_host: "{{ groups['valkey_primary'][0] }}"
+valkey_primary_address: "{{ hostvars[valkey_primary_host].valkey_bind_address }}"
+valkey_primary_port: "{{ hostvars[valkey_primary_host].valkey_port }}"
+valkey_password: "{{ vault_valkey_password }}"
+valkey_maxmemory_policy: allkeys-lru
+valkey_loglevel: notice

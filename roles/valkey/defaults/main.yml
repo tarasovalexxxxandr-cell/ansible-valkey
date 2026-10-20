@@ -1,0 +1,14 @@
+---
+valkey_mode: primary
+valkey_port: 6379
+valkey_bind_address: 127.0.0.1
+valkey_bind:
+  - 127.0.0.1
+valkey_primary_address: ""
+valkey_primary_port: 6379
+valkey_password: ""
+valkey_maxmemory: 256mb
+valkey_maxmemory_policy: allkeys-lru
+valkey_loglevel: notice
+valkey_logfile: /var/log/valkey/valkey-server.log
+valkey_package: valkey-server

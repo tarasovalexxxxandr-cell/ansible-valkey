@@ -1,0 +1,61 @@
+---
+- name: Verify test firewall isolation and persistent services
+  hosts: valkey_nodes
+  gather_facts: true
+  tasks:
+    - name: Validate the persisted nftables configuration
+      ansible.builtin.command:
+        argv: [/usr/sbin/nft, --check, --file, /etc/nftables.d/valkey.nft]
+      changed_when: false
+
+    - name: Verify that the independent application table is preserved
+      ansible.builtin.command:
+        argv: [/usr/sbin/nft, list, table, inet, molecule_other]
+      changed_when: false
+
+    - name: Verify that the project table is loaded
+      ansible.builtin.command:
+        argv: [/usr/sbin/nft, list, table, inet, valkey]
+      register: valkey_test_rules
+      changed_when: false
+      until: valkey_test_rules.rc == 0
+      retries: 10
+      delay: 1
+
+    - name: Read the Valkey service state after lifecycle changes
+      ansible.builtin.systemd_service:
+        name: valkey-server
+      register: valkey_test_service
+
+    - name: Verify that Valkey is active after lifecycle changes
+      ansible.builtin.assert:
+        that:
+          - valkey_test_service.status.ActiveState == 'active'
+          - "('tcp dport ' + (valkey_port | string)) in valkey_test_rules.stdout"
+
+- name: Verify SSH on the nonstandard test port
+  hosts: valkey_primary
+  gather_facts: false
+  tasks:
+    - name: Authenticate to each test host over SSH
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -i
+          - /root/.ssh/valkey-test
+          - -p
+          - "{{ valkey_test_ssh_port | string }}"
+          - -o
+          - BatchMode=yes
+          - -o
+          - StrictHostKeyChecking=yes
+          - -o
+          - ConnectTimeout=3
+          - "root@{{ hostvars[item].valkey_bind_address }}"
+          - printf ssh-ok
+      loop: "{{ groups['valkey_nodes'] }}"
+      register: valkey_test_ssh
+      changed_when: false
+      until: valkey_test_ssh.rc == 0 and valkey_test_ssh.stdout == 'ssh-ok'
+      retries: 15
+      delay: 2

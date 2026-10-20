@@ -1,0 +1,51 @@
+---
+- name: Verify variable changes and service restarts
+  hosts: valkey_nodes
+  gather_facts: true
+  tasks:
+    - name: Record the PID before configuration changes
+      ansible.builtin.systemd_service:
+        name: valkey-server
+      register: valkey_before_change
+
+    - name: Record the original port
+      ansible.builtin.set_fact:
+        valkey_test_original_port: "{{ valkey_port }}"
+
+    - name: Override the port and memory limit for this test
+      ansible.builtin.set_fact:
+        valkey_port: "{{ valkey_port | int + 1 if valkey_port | int < 65535 else valkey_port | int - 1 }}"
+        valkey_maxmemory: "{{ '96mb' if valkey_maxmemory == '80mb' else '80mb' }}"
+
+    - name: Use the updated primary port even when node ports differ
+      ansible.builtin.set_fact:
+        valkey_primary_port: "{{ hostvars[groups['valkey_primary'][0]].valkey_port }}"
+
+- name: Apply the main playbook with updated variables
+  ansible.builtin.import_playbook: ../playbooks/site.yml
+
+- name: Verify the restart and port change
+  hosts: valkey_nodes
+  gather_facts: false
+  tasks:
+    - name: Read the PID after the restart handler
+      ansible.builtin.systemd_service:
+        name: valkey-server
+      register: valkey_after_change
+
+    - name: Verify that the process was restarted
+      ansible.builtin.assert:
+        that:
+          - valkey_after_change.status.MainPID | int > 0
+          - valkey_before_change.status.MainPID != valkey_after_change.status.MainPID
+        fail_msg: "Изменение шаблона должно вызвать handler и заменить процесс Valkey."
+
+    - name: Verify that the previous port is closed
+      ansible.builtin.wait_for:
+        host: "{{ valkey_bind_address }}"
+        port: "{{ valkey_test_original_port }}"
+        state: stopped
+        timeout: 10
+
+- name: Verify replication and memory settings on the new port
+  ansible.builtin.import_playbook: verify.yml

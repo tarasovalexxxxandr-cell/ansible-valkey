@@ -1,0 +1,51 @@
+---
+- name: Validate environment capabilities
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['pkg_mgr'] == 'apt'
+      - ansible_facts['service_mgr'] == 'systemd'
+    fail_msg: "Нужны apt, systemd и пакет valkey-server в подключённых репозиториях."
+
+- name: Validate Valkey settings before changing configuration
+  ansible.builtin.assert:
+    that:
+      - valkey_mode in ['primary', 'replica']
+      - valkey_port | string is match('^[0-9]+$')
+      - valkey_port | int >= 1024
+      - valkey_port | int <= 65535
+      - valkey_bind is sequence and valkey_bind is not string
+      - valkey_bind | length > 0
+      - "'127.0.0.1' in valkey_bind"
+      - valkey_bind_address in valkey_bind
+      - valkey_maxmemory is match('^[1-9][0-9]*(mb|gb)$')
+      - valkey_maxmemory_policy in ['allkeys-lru', 'allkeys-lfu', 'allkeys-random', 'volatile-lru', 'volatile-lfu',
+                                  'volatile-random', 'volatile-ttl', 'noeviction']
+      - valkey_loglevel in ['debug', 'verbose', 'notice', 'warning']
+      - valkey_logfile is match('^/var/log/valkey/[a-zA-Z0-9_.-]+\.log$')
+    fail_msg: "Проверьте режим, порт 1024–65535, bind, память (mb/gb), eviction policy и логирование."
+
+- name: Validate local bind addresses
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item in ansible_facts.all_ipv4_addresses + ansible_facts.all_ipv6_addresses + ['127.0.0.1', '::1']
+    fail_msg: "bind должен содержать адреса интерфейсов этого узла либо loopback."
+  loop: "{{ valkey_bind }}"
+
+- name: Validate the 64-character hexadecimal password
+  ansible.builtin.assert:
+    that:
+      - valkey_password is string
+      - valkey_password is match('^[a-fA-F0-9]{64}$')
+  no_log: true
+
+- name: Validate the replica connection settings
+  ansible.builtin.assert:
+    that:
+      - valkey_primary_address is match('^[a-zA-Z0-9_.:-]+$')
+      - valkey_primary_address != valkey_bind_address
+      - valkey_primary_port | string is match('^[0-9]+$')
+      - valkey_primary_port | int >= 1024
+      - valkey_primary_port | int <= 65535
+    fail_msg: "Укажите адрес Primary и его порт для Replica."
+  when: valkey_mode == 'replica'

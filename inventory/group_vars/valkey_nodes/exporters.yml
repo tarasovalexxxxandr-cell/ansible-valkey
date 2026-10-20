@@ -1,0 +1,12 @@
+---
+node_exporter_version: 1.12.1
+node_exporter_web_listen_address: "127.0.0.1:9100"
+
+redis_exporter_version: 1.89.0
+redis_exporter_addr: "redis://127.0.0.1:{{ valkey_port }}"
+redis_exporter_namespace: valkey
+redis_exporter_web_listen_address: "127.0.0.1:9121"
+redis_exporter_system_user: valkey-exp
+redis_exporter_system_group: valkey-exp
+redis_exporter_config_dir: /etc/valkey-exporter
+redis_exporter_redact_config_metrics: true

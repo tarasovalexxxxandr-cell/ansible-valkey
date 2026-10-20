@@ -1,0 +1,7 @@
+---
+profile: production
+exclude_paths:
+  - .ansible/
+  - .venv/
+  - .cache/
+  - inventory/group_vars/valkey_nodes/vault.yml

@@ -1,0 +1,3 @@
+---
+valkey_mode: primary
+valkey_maxmemory: 256mb

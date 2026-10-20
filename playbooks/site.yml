@@ -1,0 +1,61 @@
+---
+- name: Configure Valkey
+  hosts: valkey_nodes
+  become: true
+  pre_tasks:
+    - name: Validate capabilities and inputs before configuring the firewall
+      ansible.builtin.import_role:
+        name: valkey
+        tasks_from: validate
+      tags: always
+
+    - name: Configure the host firewall
+      ansible.builtin.import_tasks: tasks/firewall.yml
+      tags: config
+
+  tasks:
+    - name: Configure Valkey
+      ansible.builtin.import_role:
+        name: valkey
+      tags: valkey
+
+    - name: Configure exporters
+      tags: exporters
+      block:
+        - name: Store the exporter password in a restricted file
+          ansible.builtin.copy:
+            content: "REDIS_PASSWORD={{ valkey_password }}\n"
+            dest: /etc/valkey-exporter.env
+            owner: root
+            group: root
+            mode: "0600"
+          no_log: true
+          diff: false
+          notify: restart redis_exporter
+
+        - name: Create the exporter systemd drop-in directory
+          ansible.builtin.file:
+            path: /etc/systemd/system/redis_exporter.service.d
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: Configure the exporter password file
+          ansible.builtin.copy:
+            content: |
+              [Service]
+              EnvironmentFile=/etc/valkey-exporter.env
+            dest: /etc/systemd/system/redis_exporter.service.d/credentials.conf
+            owner: root
+            group: root
+            mode: "0644"
+          notify: restart redis_exporter
+
+        - name: Install Node Exporter
+          ansible.builtin.import_role:
+            name: prometheus.prometheus.node_exporter
+
+        - name: Install the Valkey metrics exporter
+          ansible.builtin.import_role:
+            name: prometheus.prometheus.redis_exporter

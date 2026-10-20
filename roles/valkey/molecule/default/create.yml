@@ -1,0 +1,64 @@
+---
+- name: Create isolated systemd test instances
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Persist a unique resource namespace
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.password', '/dev/null', length=12, chars=['hexdigits']) | lower }}"
+        dest: "{{ molecule_ephemeral_directory }}/run-id"
+        mode: "0600"
+        force: false
+
+    - name: Read the resource namespace
+      ansible.builtin.set_fact:
+        valkey_run_id: "{{ lookup('ansible.builtin.file', molecule_ephemeral_directory + '/run-id') }}"
+
+    - name: Build the selected systemd image
+      community.docker.docker_image:
+        name: "valkey-{{ valkey_run_id }}-systemd"
+        tag: test
+        source: build
+        build:
+          path: "{{ molecule_scenario_directory }}"
+          dockerfile: Dockerfile
+          args:
+            BASE_IMAGE: "{{ lookup('ansible.builtin.env', 'VALKEY_TEST_IMAGE') | default('ubuntu:24.04', true) }}"
+            SSH_PORT: "{{ lookup('ansible.builtin.env', 'VALKEY_TEST_SSH_PORT') | default('2222', true) }}"
+          pull: true
+
+    - name: Create a network with automatic or explicitly selected IPAM
+      community.docker.docker_network:
+        name: "valkey-{{ valkey_run_id }}-network"
+        labels:
+          valkey_masterclass_run: "{{ valkey_run_id }}"
+        ipam_config: >-
+          {{ [{'subnet': lookup('ansible.builtin.env', 'VALKEY_TEST_SUBNET')}]
+             if lookup('ansible.builtin.env', 'VALKEY_TEST_SUBNET') else omit }}
+
+    - name: Start test instances without publishing ports
+      community.docker.docker_container:
+        name: "valkey-{{ valkey_run_id }}-{{ item.name }}"
+        hostname: "{{ item.name }}"
+        image: "valkey-{{ valkey_run_id }}-systemd:test"
+        command: /sbin/init
+        state: started
+        privileged: true
+        cgroupns_mode: private
+        tmpfs: [/run, /run/lock]
+        labels:
+          valkey_masterclass_run: "{{ valkey_run_id }}"
+        networks:
+          - name: "valkey-{{ valkey_run_id }}-network"
+        stop_signal: SIGRTMIN+3
+      loop: "{{ molecule_yml.platforms }}"
+
+    - name: Generate a temporary password outside the repository
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.password', '/dev/null', length=64, chars=['hexdigits']) }}"
+        dest: "{{ molecule_ephemeral_directory }}/valkey-password"
+        mode: "0600"
+        force: false
+      no_log: true

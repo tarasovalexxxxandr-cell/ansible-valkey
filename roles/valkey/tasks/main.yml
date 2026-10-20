@@ -1,0 +1,12 @@
+---
+- name: Validate role inputs
+  ansible.builtin.import_tasks: validate.yml
+  tags: always
+
+- name: Install packages
+  ansible.builtin.import_tasks: install.yml
+  tags: install
+
+- name: Configure Valkey
+  ansible.builtin.import_tasks: configure.yml
+  tags: config

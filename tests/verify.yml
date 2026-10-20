@@ -1,0 +1,239 @@
+---
+- name: Verify configuration drift recovery
+  hosts: valkey_nodes
+  gather_facts: true
+  tasks:
+    - name: Verify the rendered configuration
+      ansible.builtin.include_tasks: tasks/configuration.yml
+
+- name: Verify Valkey on both nodes
+  hosts: valkey_nodes
+  become: true
+  gather_facts: false
+  vars:
+    valkey_cli:
+      - /usr/bin/timeout
+      - 5s
+      - /usr/bin/valkey-cli
+      - --raw
+      - -h
+      - "{{ valkey_bind_address }}"
+      - -p
+      - "{{ valkey_port | string }}"
+  tasks:
+    - name: Skip runtime checks in check mode
+      ansible.builtin.meta: end_play
+      when: ansible_check_mode
+
+    - name: Validate the test topology
+      ansible.builtin.assert:
+        that:
+          - groups['valkey_primary'] | default([]) | length == 1
+          - groups['valkey_replicas'] | default([]) | length == 1
+          - ansible_play_hosts_all | sort == groups['valkey_nodes'] | sort
+        fail_msg: "Проверка требует полной пары Valkey без --limit."
+
+    - name: Gather installed package facts
+      ansible.builtin.package_facts:
+        manager: apt
+
+    - name: Report the installed Valkey package
+      ansible.builtin.debug:
+        msg: "Valkey: {{ ansible_facts.packages['valkey-server'][0].version }}"
+
+    - name: Gather service facts
+      ansible.builtin.service_facts:
+
+    - name: Inspect the configuration file
+      ansible.builtin.stat:
+        path: /etc/valkey/valkey.conf
+      register: valkey_config_file
+
+    - name: Read the nftables service state
+      ansible.builtin.systemd_service:
+        name: valkey-firewall
+      register: valkey_test_firewall
+
+    - name: Verify configuration permissions and service state
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['services']['valkey-server.service']['state'] == 'running'
+          - ansible_facts['services']['valkey-server.service']['status'] == 'enabled'
+          - valkey_test_firewall.status.ActiveState == 'active'
+          - ansible_facts['services']['valkey-firewall.service']['status'] == 'enabled'
+          - valkey_config_file.stat.exists
+          - valkey_config_file.stat.mode == '0640'
+          - valkey_config_file.stat.pw_name == 'root'
+          - valkey_config_file.stat.gr_name == 'valkey'
+        fail_msg: "Valkey должен быть запущен и включён; valkey.conf — root:valkey 0640."
+
+    - name: Verify the protocol and authentication with valkey-cli
+      block:
+        - name: Read INFO from the running Valkey instance
+          ansible.builtin.command:
+            argv: "{{ valkey_cli }}"
+            stdin: "AUTH {{ valkey_password }}\nINFO\n"
+          register: valkey_info
+          changed_when: false
+          until:
+            - valkey_info.rc == 0
+            - "'OK' in valkey_info.stdout_lines"
+            - "'role:' in valkey_info.stdout"
+            - "valkey_mode == 'primary' or 'master_link_status:up' in valkey_info.stdout_lines"
+          retries: 15
+          delay: 2
+          no_log: true
+
+        - name: Verify the role and memory settings
+          ansible.builtin.assert:
+            that:
+              - "('role:' + ('master' if valkey_mode == 'primary' else 'slave')) in valkey_info.stdout_lines"
+              - >-
+                ('maxmemory:' + (valkey_maxmemory[:-2] | int *
+                (1048576 if valkey_maxmemory[-2:] == 'mb' else 1073741824)) | string)
+                in valkey_info.stdout_lines
+              - "('maxmemory_policy:' + valkey_maxmemory_policy) in valkey_info.stdout_lines"
+          no_log: true
+
+        - name: Verify the replica connection to the primary
+          ansible.builtin.assert:
+            that:
+              - "'master_link_status:up' in valkey_info.stdout_lines"
+              - "('master_host:' + valkey_primary_address) in valkey_info.stdout_lines"
+              - "('master_port:' + (valkey_primary_port | string)) in valkey_info.stdout_lines"
+          when: valkey_mode == 'replica'
+          no_log: true
+
+        - name: Send requests with missing and incorrect passwords
+          ansible.builtin.command:
+            argv: "{{ valkey_cli }}"
+            stdin: "{{ ('AUTH ' + item + '\n') if item else '' }}PING\n"
+          loop:
+            - ""
+            - "{{ valkey_password }}-invalid"
+          register: valkey_auth_checks
+          changed_when: false
+          failed_when: false
+          no_log: true
+
+        - name: Verify that unauthenticated requests are rejected
+          ansible.builtin.assert:
+            that:
+              - "'NOAUTH' in item.stdout"
+              - "'PONG' not in item.stdout"
+              - "item.item == '' or 'WRONGPASS' in (item.stdout + item.stderr)"
+          loop: "{{ valkey_auth_checks.results }}"
+          no_log: true
+      rescue:
+        - name: Report a Valkey verification failure
+          ansible.builtin.fail:
+            msg: "Valkey не прошёл проверку INFO, режима, памяти или AUTH. Проверьте конфигурацию и Vault."
+
+- name: Verify test key replication
+  hosts: valkey_primary
+  become: true
+  gather_facts: false
+  vars:
+    valkey_primary_cli:
+      - /usr/bin/timeout
+      - 5s
+      - /usr/bin/valkey-cli
+      - --raw
+      - -h
+      - "{{ valkey_bind_address }}"
+      - -p
+      - "{{ valkey_port | string }}"
+    valkey_replica_cli:
+      - /usr/bin/timeout
+      - 5s
+      - /usr/bin/valkey-cli
+      - --raw
+      - -h
+      - "{{ hostvars[groups['valkey_replicas'][0]].valkey_bind_address }}"
+      - -p
+      - "{{ hostvars[groups['valkey_replicas'][0]].valkey_port | string }}"
+  tasks:
+    - name: Skip test writes in check mode
+      ansible.builtin.meta: end_play
+      when: ansible_check_mode
+
+    - name: Generate a unique test key
+      ansible.builtin.set_fact:
+        valkey_test_key: "ansible-check:{{ lookup('ansible.builtin.password', '/dev/null', length=24, chars=['ascii_letters', 'digits']) }}"
+
+    - name: Write a test key and wait for replication
+      block:
+        - name: Write a key to the primary with a 120-second TTL
+          ansible.builtin.command:
+            argv: "{{ valkey_primary_cli }}"
+            stdin: "AUTH {{ valkey_password }}\nSET {{ valkey_test_key }} {{ valkey_test_key }} EX 120\n"
+          register: valkey_write
+          changed_when: true
+          failed_when: valkey_write.rc != 0 or valkey_write.stdout_lines != ['OK', 'OK']
+          no_log: true
+
+        - name: Read the test key from the replica
+          ansible.builtin.command:
+            argv: "{{ valkey_replica_cli }}"
+            stdin: "AUTH {{ valkey_password }}\nGET {{ valkey_test_key }}\n"
+          register: valkey_read
+          changed_when: false
+          until: valkey_read.rc == 0 and valkey_read.stdout_lines == ['OK', valkey_test_key]
+          retries: 15
+          delay: 2
+          no_log: true
+      rescue:
+        - name: Report a replication failure
+          ansible.builtin.fail:
+            msg: "Не удалось записать ключ на Primary или прочитать его на Replica за ограниченное время."
+      always:
+        - name: Delete the test key
+          ansible.builtin.command:
+            argv: "{{ valkey_primary_cli }}"
+            stdin: "AUTH {{ valkey_password }}\nDEL {{ valkey_test_key }}\n"
+          register: valkey_cleanup
+          changed_when: "'1' in valkey_cleanup.stdout_lines"
+          failed_when: valkey_cleanup.rc != 0 or valkey_cleanup.stdout_lines | first != 'OK'
+          no_log: true
+
+- name: Verify exporters on both nodes
+  hosts: valkey_nodes
+  gather_facts: false
+  tasks:
+    - name: Fetch Node Exporter metrics
+      ansible.builtin.uri:
+        url: http://127.0.0.1:9100/metrics
+        return_content: true
+      register: valkey_test_node_metrics
+      until: valkey_test_node_metrics.status == 200
+      retries: 10
+      delay: 2
+
+    - name: Fetch Valkey metrics
+      ansible.builtin.uri:
+        url: http://127.0.0.1:9121/metrics
+        return_content: true
+      register: valkey_test_metrics
+      until:
+        - valkey_test_metrics.status == 200
+        - "'valkey_up 1' in valkey_test_metrics.content"
+      retries: 10
+      delay: 2
+
+    - name: Inspect the exporter password file
+      ansible.builtin.stat:
+        path: /etc/valkey-exporter.env
+      register: valkey_test_exporter_secret
+
+    - name: Verify metrics, exporter services and password file permissions
+      ansible.builtin.assert:
+        that:
+          - "'node_uname_info{' in valkey_test_node_metrics.content"
+          - "'valkey_up 1' in valkey_test_metrics.content"
+          - valkey_test_exporter_secret.stat.mode == '0600'
+          - valkey_test_exporter_secret.stat.pw_name == 'root'
+          - ansible_facts.services['node_exporter.service'].state == 'running'
+          - ansible_facts.services['node_exporter.service'].status == 'enabled'
+          - ansible_facts.services['redis_exporter.service'].state == 'running'
+          - ansible_facts.services['redis_exporter.service'].status == 'enabled'
+        fail_msg: "Экспортеры должны отдавать метрики; файл пароля должен быть root 0600."
